@@ -230,8 +230,18 @@ function renderStep(event) {
   node.classList.toggle('is-active', isActive);
   node.classList.toggle('is-done', isDone);
 
-  // auto-scroll
-  el.researchPanel.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+  scrollLeftPaneToBottom();
+}
+
+function scrollLeftPaneToBottom() {
+  // Only scroll the inner left pane, never the page. Skip while the panel
+  // is collapsed (the profile card is the focus then).
+  if (el.researchPanel.classList.contains('is-collapsed')) return;
+  const wsLeft = document.getElementById('ws-left');
+  if (!wsLeft) return;
+  // If user is within ~80px of the bottom, stay pinned; otherwise leave alone.
+  const nearBottom = wsLeft.scrollHeight - wsLeft.scrollTop - wsLeft.clientHeight < 120;
+  if (nearBottom) wsLeft.scrollTop = wsLeft.scrollHeight;
 }
 
 function stepKey(event) {
@@ -248,7 +258,7 @@ function renderMessageBlock(text, kind /* 'message' | 'reasoning' */) {
     $('div', { className: 'thought-block-text', text }),
   ]);
   el.reasoningFeed.appendChild(block);
-  block.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+  scrollLeftPaneToBottom();
 }
 
 function finalizeResearch(event) {
@@ -285,6 +295,9 @@ async function fetchAndRenderProfile() {
     el.researchPanel.classList.add('is-collapsed');
     const title = el.researchPanel.querySelector('.panel-title');
     title.addEventListener('click', () => el.researchPanel.classList.toggle('is-open'));
+    // Bring the profile card into view (resets any auto-scroll done during streaming).
+    const wsLeft = document.getElementById('ws-left');
+    if (wsLeft) wsLeft.scrollTop = 0;
   } catch (err) {
     showError(`无法获取调研结果：${err.message}`);
   }
@@ -566,3 +579,23 @@ el.chatInput.addEventListener('keydown', (e) => {
     el.chatForm.requestSubmit();
   }
 });
+
+/* ---------- deep-link: ?task=<id> opens a completed task, ?url=<...> auto-starts a new one ---------- */
+(function deepLink() {
+  const params = new URLSearchParams(location.search);
+  const taskParam = params.get('task');
+  const urlParam = params.get('url');
+  if (taskParam) {
+    state.taskId = taskParam;
+    el.wsUrl.textContent = '(已有任务)';
+    switchView('workspace');
+    setStatus('加载中…', 'pending');
+    // Attach to the live stream. If the task already finished, the stream's
+    // iter_events still yields buffered events (we'll see a `final` frame and
+    // load the profile via finalizeResearch).
+    openResearchStream(taskParam);
+  } else if (urlParam) {
+    el.urlInput.value = urlParam;
+    startResearch(urlParam);
+  }
+})();
