@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Interactive Podcast</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <!-- ============================ LANDING ============================ -->
+  <main id="view-landing" class="view view-landing is-visible">
+    <header class="landing-header">
+      <div class="logo">Interactive Podcast</div>
+      <nav class="nav-meta">
+        <span>由本机 Codex agent 驱动</span>
+      </nav>
+    </header>
+
+    <section class="landing-hero">
+      <h1 class="hero-title">把一期播客<br/>变成一位真实的人。</h1>
+      <p class="hero-sub">
+        粘贴一个播客链接，agent 会自动识别这一期的主角，调研身份、论文、新闻、社交媒体与照片。<br/>
+        完成后，你可以直接与「他/她」对话。
+      </p>
+
+      <form id="research-form" class="hero-form">
+        <input
+          id="url-input"
+          name="url"
+          type="url"
+          required
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="https://www.xiaoyuzhoufm.com/episode/..."
+        />
+        <button type="submit" id="start-btn">开始调研</button>
+      </form>
+
+      <div class="hero-hint" id="hero-hint">
+        支持小宇宙、Apple Podcasts、Spotify、个人网站等任意可访问的页面链接。
+      </div>
+    </section>
+
+    <footer class="landing-footer">
+      <span>模型：gpt-5.5 medium · fast 模式</span>
+    </footer>
+  </main>
+
+  <!-- ============================ WORKSPACE ============================ -->
+  <main id="view-workspace" class="view view-workspace">
+    <header class="ws-header">
+      <button class="ws-back" id="back-btn" aria-label="返回">←</button>
+      <div class="ws-url" id="ws-url"></div>
+      <div class="ws-status" id="ws-status">
+        <span class="status-dot"></span>
+        <span class="status-text">准备中</span>
+      </div>
+    </header>
+
+    <!-- two-column layout -->
+    <div class="ws-grid">
+      <!-- LEFT: profile area (collapsed during research, expanded after) -->
+      <section class="ws-left" id="ws-left">
+        <!-- Research progress (visible during research, collapses after) -->
+        <div class="research-panel" id="research-panel">
+          <h2 class="panel-title">调研进度</h2>
+          <ol class="step-list" id="step-list"></ol>
+          <div class="reasoning-feed" id="reasoning-feed"></div>
+        </div>
+
+        <!-- Profile card (rendered after research is done) -->
+        <article class="profile-card" id="profile-card" hidden>
+          <div class="profile-top">
+            <div class="profile-avatar" id="profile-avatar">
+              <span class="avatar-fallback" id="avatar-fallback">·</span>
+            </div>
+            <div class="profile-meta">
+              <h2 class="profile-name" id="profile-name"></h2>
+              <div class="profile-title" id="profile-title"></div>
+              <div class="profile-company" id="profile-company"></div>
+              <p class="profile-bio" id="profile-bio"></p>
+              <div class="profile-socials" id="profile-socials"></div>
+            </div>
+          </div>
+
+          <div class="profile-sections">
+            <section class="profile-section" id="section-perspectives" hidden>
+              <h3>核心观点</h3>
+              <ul id="perspectives-list"></ul>
+            </section>
+
+            <section class="profile-section" id="section-papers" hidden>
+              <h3>代表性论文</h3>
+              <ul id="papers-list"></ul>
+            </section>
+
+            <section class="profile-section" id="section-news" hidden>
+              <h3>新闻与报道</h3>
+              <ul id="news-list"></ul>
+            </section>
+
+            <section class="profile-section" id="section-episode" hidden>
+              <h3>本期内容</h3>
+              <div id="episode-block"></div>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <!-- RIGHT: chat panel -->
+      <aside class="ws-right">
+        <div class="chat-panel" id="chat-panel">
+          <header class="chat-header">
+            <div class="chat-title">
+              <span id="chat-with-name">与嘉宾对话</span>
+            </div>
+            <div class="chat-sub" id="chat-sub">调研完成后可开始对话</div>
+          </header>
+
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-empty" id="chat-empty">
+              <div class="chat-empty-icon">·</div>
+              <p>调研完成后，agent 会以这位嘉宾的口吻与你对话。</p>
+            </div>
+          </div>
+
+          <form class="chat-form" id="chat-form" autocomplete="off">
+            <textarea
+              id="chat-input"
+              rows="1"
+              placeholder="调研完成后开始对话…"
+              disabled
+            ></textarea>
+            <button type="submit" id="chat-send" disabled>发送</button>
+          </form>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
