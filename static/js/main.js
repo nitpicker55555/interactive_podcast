@@ -421,9 +421,13 @@ async function renderProfile(manifest) {
   // Tabs
   renderTabs(manifest.pages || []);
 
-  // Initial page
-  if ((manifest.pages || []).length > 0) {
-    await switchTab(manifest.pages[0].file);
+  // Initial page (allow override via ?tab=<index>)
+  const params = new URLSearchParams(location.search);
+  const tabParam = parseInt(params.get('tab') || '', 10);
+  const pages = manifest.pages || [];
+  if (pages.length > 0) {
+    const idx = Number.isFinite(tabParam) && tabParam >= 0 && tabParam < pages.length ? tabParam : 0;
+    await switchTab(pages[idx].file);
   }
 }
 
