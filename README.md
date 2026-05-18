@@ -20,12 +20,22 @@
 ```bash
 python3.13 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+cp .env.example .env  # 然后填上你的 OpenAI 兼容端点 key
 .venv/bin/python app.py
 ```
 
 打开 http://127.0.0.1:5050
 
 > 在 macOS 上如果用 Python 3.14 安装 pip 报 `pyexpat` 错误，切换到 3.13（`brew install python@3.13`）即可。
+
+## 为什么 research 用 codex、chat 用 OpenAI API
+
+`codex exec --json` 当前只输出 item-level 完成事件（`item.completed`），没有 token-level deltas。所以：
+
+- **research 阶段**用 codex，因为它的核心价值是工具（web_search、playwright MCP、shell），item 级的"分段流式"对调研足够自然。
+- **chat 阶段**改用 OpenAI 兼容 API 直接 streaming（`stream=True`），拿到 token-by-token delta，真正逐字到达浏览器。这条路需要在 `.env` 里配 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。
+
+`fast 模式` 仍然有效：所有 codex 调用都带 `-c service_tier=fast`，按 codex 文档这会把请求里的 service_tier 设为 `priority`。
 
 ## 模型设置
 

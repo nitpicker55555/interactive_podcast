@@ -7,6 +7,7 @@ import os
 import threading
 from typing import Optional
 
+from .chat_streaming import stream_chat
 from .codex_agent import CodexEvent, stream_codex
 from .prompts import build_research_prompt, build_roleplay_system_prompt
 from .session_store import ChatTurn, Task, store
@@ -195,43 +196,66 @@ def start_research_in_background(task: Task) -> threading.Thread:
 
 
 def _run_chat_turn(turn: ChatTurn) -> None:
+    """Stream a role-play reply from the OpenAI-compatible endpoint.
+
+    We use direct streaming (token deltas) here instead of codex CLI
+    because codex exec --json only emits one final item.completed per
+    message, which prevents real character-level streaming.
+    """
     task = store.get_task(turn.task_id)
     if task is None or task.manifest is None:
         turn.set_status("error", error="task not found or manifest missing")
         return
 
-    is_first_turn = task.chat_thread_id is None
-    if is_first_turn:
+    # Build messages = [system, ...history, current user]
+    with task._chat_lock:  # noqa: SLF001
         system_prompt = build_roleplay_system_prompt(
             manifest=task.manifest,
             persona_text=task.persona_text or "",
             overview_text=task.overview_text or "",
         )
-        prompt = f"{system_prompt}\n\n---\n\n用户对你说：\n{turn.user_message}"
-        resume_id: Optional[str] = None
-    else:
-        prompt = turn.user_message
-        resume_id = task.chat_thread_id
+        history = list(task.chat_history)
+
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": turn.user_message})
 
     turn.set_status("streaming")
+    turn.append({"kind": "turn", "phase": "started"})
 
-    last_message_text: Optional[str] = None
+    full_reply_parts: list[str] = []
+    error: Optional[str] = None
     try:
-        for event in stream_codex(prompt, resume_thread_id=resume_id, cwd=task.workspace_dir):
-            ui_event = _classify(event)
-            if ui_event.get("kind") == "thread" and is_first_turn:
-                task.chat_thread_id = ui_event.get("thread_id")
-            if ui_event.get("kind") == "message" and ui_event.get("status") == "completed":
-                last_message_text = ui_event.get("text", "")
-            turn.append(ui_event)
-    except Exception as exc:  # pragma: no cover
-        turn.set_status("error", error=f"codex stream failure: {exc!r}")
+        for ev in stream_chat(messages):
+            kind = ev.get("kind")
+            if kind == "delta":
+                full_reply_parts.append(ev["text"])
+                turn.append({"kind": "delta", "text": ev["text"]})
+            elif kind == "done":
+                # final concatenated text is what we'll save to history
+                pass
+            elif kind == "error":
+                error = ev.get("text") or "unknown chat error"
+                turn.append({"kind": "error", "text": error})
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        turn.append({"kind": "error", "text": error})
+
+    full_reply = "".join(full_reply_parts).strip()
+    if not full_reply and not error:
+        error = "empty reply from chat endpoint"
+        turn.append({"kind": "error", "text": error})
+
+    if error and not full_reply:
+        turn.set_status("error", error=error)
         return
 
-    if last_message_text is None:
-        turn.set_status("error", error="codex returned no reply")
-        return
+    # Append both user message + assistant reply to history atomically
+    with task._chat_lock:  # noqa: SLF001
+        task.chat_history.append({"role": "user", "content": turn.user_message})
+        task.chat_history.append({"role": "assistant", "content": full_reply})
 
+    turn.append({"kind": "message", "status": "completed", "text": full_reply})
     turn.set_status("done")
 
 

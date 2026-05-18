@@ -417,13 +417,18 @@ input, textarea {
 
 /* typing cursor for streamed text */
 .thought-block-text.is-typing::after,
-.markdown-body.is-typing::after {
+.markdown-body.is-typing::after,
+.chat-msg-bubble.is-typing::after {
   content: '▌';
   display: inline-block;
   color: var(--accent);
   margin-left: 2px;
   animation: blink 0.9s steps(2) infinite;
   font-weight: 400;
+}
+
+.chat-msg.is-agent .chat-msg-bubble.is-typing::after {
+  color: var(--text);
 }
 
 @keyframes blink {

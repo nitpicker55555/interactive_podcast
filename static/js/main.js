@@ -573,39 +573,46 @@ function openChatStream(turnId, typingBubble, statusLine) {
   if (state.chatEventSource) state.chatEventSource.close();
   const es = new EventSource(`/api/chat/stream/${turnId}`);
   state.chatEventSource = es;
-  let gotMessage = false;
+  let gotAnyText = false;
+  let accumulated = '';
+
+  function ensureCleanBubble() {
+    if (!gotAnyText) {
+      typingBubble.innerHTML = '';
+      typingBubble.classList.add('is-typing');
+      if (statusLine && statusLine.parentNode) statusLine.remove();
+    }
+  }
 
   es.onmessage = (e) => {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
     if (!data || !data.kind) return;
 
-    if (data.kind === 'step') {
-      let label = '';
-      if (data.subkind === 'web_search') label = data.query ? `搜索：${data.query.slice(0, 32)}` : '搜索中';
-      else if (data.subkind === 'mcp') label = `调用 ${data.tool || 'mcp'}`;
-      else if (data.subkind === 'shell') label = '执行命令';
-      else if (data.subkind === 'reasoning') label = '推理中';
-      if (label && data.status !== 'completed' && statusLine && statusLine.parentNode) {
-        statusLine.textContent = label;
-      }
-    } else if (data.kind === 'message' && data.status === 'completed' && data.text) {
-      typingBubble.innerHTML = '';
-      typewriter(typingBubble, data.text).then(() => {
-        el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
-      });
-      if (statusLine && statusLine.parentNode) statusLine.remove();
-      gotMessage = true;
+    if (data.kind === 'delta' && data.text) {
+      ensureCleanBubble();
+      accumulated += data.text;
+      typingBubble.textContent = accumulated;
+      gotAnyText = true;
       el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+    } else if (data.kind === 'message' && data.status === 'completed' && data.text) {
+      // Safety net: if for any reason deltas didn't arrive, the server still
+      // sends the full text at the end of the turn.
+      ensureCleanBubble();
+      if (data.text !== accumulated) {
+        typingBubble.textContent = data.text;
+      }
+      gotAnyText = true;
     } else if (data.kind === 'error') {
+      ensureCleanBubble();
       typingBubble.textContent = `（出错：${data.text || '未知错误'}）`;
-      if (statusLine && statusLine.parentNode) statusLine.remove();
     } else if (data.kind === 'final') {
       es.close();
       state.chatEventSource = null;
-      if (!gotMessage) {
+      typingBubble.classList.remove('is-typing');
+      if (!gotAnyText) {
         typingBubble.textContent = data.error ? `（出错：${data.error}）` : '（没有收到回复）';
-        statusLine.remove();
+        if (statusLine && statusLine.parentNode) statusLine.remove();
       }
       setChatEnabled(true);
       el.chatInput.focus();
@@ -615,9 +622,10 @@ function openChatStream(turnId, typingBubble, statusLine) {
   es.onerror = () => {
     setTimeout(() => {
       if (state.chatEventSource === es && es.readyState === EventSource.CLOSED) {
-        if (!gotMessage) {
+        typingBubble.classList.remove('is-typing');
+        if (!gotAnyText) {
           typingBubble.textContent = '（连接中断）';
-          statusLine.remove();
+          if (statusLine && statusLine.parentNode) statusLine.remove();
         }
         setChatEnabled(true);
       }

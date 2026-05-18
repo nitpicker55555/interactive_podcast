@@ -31,13 +31,15 @@ class Task:
     url: str
     status: str = "pending"  # pending | researching | done | error
     thread_id: Optional[str] = None  # codex thread for research
-    chat_thread_id: Optional[str] = None  # codex thread for role-play
+    chat_thread_id: Optional[str] = None  # legacy, unused after openai chat
+    chat_history: list[dict] = field(default_factory=list)  # role/content message log for role-play
     manifest: Optional[dict] = None
     persona_text: Optional[str] = None
     overview_text: Optional[str] = None
     error: Optional[str] = None
     events: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    _chat_lock: threading.Lock = field(default_factory=threading.Lock)
     _cond: threading.Condition = field(default_factory=threading.Condition)
 
     @property
@@ -135,7 +137,57 @@ class Store:
 
     def get_task(self, task_id: str) -> Optional[Task]:
         with self._lock:
-            return self._tasks.get(task_id)
+            task = self._tasks.get(task_id)
+        if task is not None:
+            return task
+        # Try to reconstruct from disk so completed tasks survive a Flask
+        # restart (chat picks up where it left off — except chat history,
+        # which is in-memory only by design).
+        return self._maybe_load_from_disk(task_id)
+
+    def _maybe_load_from_disk(self, task_id: str) -> Optional[Task]:
+        if not all(c.isalnum() for c in task_id):
+            return None
+        workspace = os.path.join(SESSIONS_DIR, task_id)
+        manifest_path = os.path.join(workspace, "manifest.json")
+        if not os.path.exists(manifest_path):
+            return None
+        try:
+            import json
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError):
+            return None
+
+        persona_text = ""
+        overview_text = ""
+        persona_file = manifest.get("persona_file")
+        if persona_file:
+            try:
+                with open(os.path.join(workspace, persona_file), "r", encoding="utf-8") as f:
+                    persona_text = f.read()
+            except OSError:
+                pass
+        pages = manifest.get("pages") or []
+        if pages and isinstance(pages[0], dict) and pages[0].get("file"):
+            try:
+                with open(os.path.join(workspace, pages[0]["file"]), "r", encoding="utf-8") as f:
+                    overview_text = f.read()
+            except OSError:
+                pass
+
+        task = Task(
+            id=task_id,
+            url=(manifest.get("podcast_episode") or {}).get("url") or "",
+            status="done",
+            manifest=manifest,
+            persona_text=persona_text,
+            overview_text=overview_text,
+        )
+        with self._lock:
+            # Race: somebody else may have created/loaded it in the meantime
+            self._tasks.setdefault(task.id, task)
+            return self._tasks[task.id]
 
     def create_chat_turn(self, task_id: str, user_message: str) -> ChatTurn:
         turn = ChatTurn(id=uuid.uuid4().hex, task_id=task_id, user_message=user_message)
