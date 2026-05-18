@@ -168,7 +168,77 @@ def api_health():
     return jsonify({"ok": True})
 
 
+def _lan_ips() -> list[str]:
+    """Discover LAN-facing IPv4 addresses (private RFC1918 ranges).
+
+    The naive `connect("8.8.8.8")` trick picks whatever interface routes
+    public traffic, which on this machine is a VPN tunnel (198.18.0.0/15
+    is RFC2544 benchmark space repurposed by some VPN clients). Scan
+    every interface and keep only addresses on a real LAN.
+    """
+    import ipaddress
+    import socket
+
+    candidates: list[str] = []
+    try:
+        host = socket.gethostname()
+        infos = socket.getaddrinfo(host, None, socket.AF_INET)
+        for info in infos:
+            ip = info[4][0]
+            candidates.append(ip)
+    except OSError:
+        pass
+
+    try:
+        # `ifaddresses` from netifaces would be cleanest, but it's not in
+        # stdlib. Use `ifconfig` parsing as a portable fallback on macOS/Linux.
+        import subprocess
+        out = subprocess.check_output(["ifconfig"], text=True, timeout=2)
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet ") and "127.0.0.1" not in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    candidates.append(parts[1])
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    keepers: list[str] = []
+    for ip in candidates:
+        try:
+            addr = ipaddress.IPv4Address(ip)
+        except ValueError:
+            continue
+        if not addr.is_private:
+            continue
+        if addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            continue
+        # Skip 198.18.0.0/15 (RFC2544 benchmarking, used by some VPN clients).
+        if int(addr) >= int(ipaddress.IPv4Address("198.18.0.0")) and \
+           int(addr) <= int(ipaddress.IPv4Address("198.19.255.255")):
+            continue
+        if ip not in keepers:
+            keepers.append(ip)
+    return keepers
+
+
 if __name__ == "__main__":
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "5050"))
-    app.run(host=host, port=port, debug=True, threaded=True, use_reloader=False)
+    # SECURITY: only enable Flask's interactive debugger when bound to the
+    # loopback interface. Exposing the Werkzeug debugger on a LAN-reachable
+    # socket lets anyone on the network execute arbitrary Python.
+    is_local = host in ("127.0.0.1", "localhost", "::1")
+    debug = is_local and os.environ.get("FLASK_DEBUG", "1") not in ("0", "false", "False")
+
+    if host == "0.0.0.0":
+        lans = _lan_ips()
+        print(f"\n  Local:   http://127.0.0.1:{port}")
+        if lans:
+            for lan in lans:
+                print(f"  LAN:     http://{lan}:{port}")
+        else:
+            print("  LAN:     (no private LAN interface detected)")
+        print(f"  (anyone on this network with the URL can use this server)\n")
+
+    app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=False)
