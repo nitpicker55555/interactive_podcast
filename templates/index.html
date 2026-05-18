@@ -2,7 +2,7 @@
 <html lang="zh-Hans">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Interactive Podcast</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
@@ -17,10 +17,10 @@
     </header>
 
     <section class="landing-hero">
-      <h1 class="hero-title">把一期播客<br/>变成一位真实的人。</h1>
+      <h1 class="hero-title"><span class="title-line">把一期播客</span><br/><span class="title-line title-line-2">变成一位真实的人。</span></h1>
       <p class="hero-sub">
-        粘贴一个播客链接，agent 会自动识别这一期的主角，调研身份、论文、新闻、社交媒体与照片。<br/>
-        完成后，你可以直接与「他/她」对话。
+        粘贴一个播客链接，agent 会自动识别这一期的主角，调研身份、论文、新闻、社交媒体与照片，<br/>
+        全程实时流式呈现。完成后，你可以直接与「他/她」对话。
       </p>
 
       <form id="research-form" class="hero-form">
@@ -42,7 +42,7 @@
     </section>
 
     <footer class="landing-footer">
-      <span>模型：gpt-5.5 medium · fast 模式</span>
+      <span>模型：gpt-5.5 medium · fast 模式 · Playwright MCP</span>
     </footer>
   </main>
 
@@ -57,20 +57,23 @@
       </div>
     </header>
 
-    <!-- two-column layout -->
+    <!-- Mobile-only: chat-toggle button -->
+    <button class="mobile-chat-toggle" id="mobile-chat-toggle" aria-label="打开对话">
+      <span class="chat-toggle-icon">💬</span>
+      <span class="chat-toggle-label">与嘉宾对话</span>
+    </button>
+
     <div class="ws-grid">
-      <!-- LEFT: profile area (collapsed during research, expanded after) -->
+      <!-- LEFT: profile + md pages -->
       <section class="ws-left" id="ws-left">
-        <!-- Research progress (visible during research, collapses after) -->
         <div class="research-panel" id="research-panel">
           <h2 class="panel-title">调研进度</h2>
           <ol class="step-list" id="step-list"></ol>
           <div class="reasoning-feed" id="reasoning-feed"></div>
         </div>
 
-        <!-- Profile card (rendered after research is done) -->
         <article class="profile-card" id="profile-card" hidden>
-          <div class="profile-top">
+          <header class="profile-header">
             <div class="profile-avatar" id="profile-avatar">
               <span class="avatar-fallback" id="avatar-fallback">·</span>
             </div>
@@ -78,39 +81,26 @@
               <h2 class="profile-name" id="profile-name"></h2>
               <div class="profile-title" id="profile-title"></div>
               <div class="profile-company" id="profile-company"></div>
-              <p class="profile-bio" id="profile-bio"></p>
+              <p class="profile-oneliner" id="profile-oneliner"></p>
               <div class="profile-socials" id="profile-socials"></div>
             </div>
-          </div>
+          </header>
 
-          <div class="profile-sections">
-            <section class="profile-section" id="section-perspectives" hidden>
-              <h3>核心观点</h3>
-              <ul id="perspectives-list"></ul>
-            </section>
+          <!-- Tab navigation -->
+          <nav class="page-tabs" id="page-tabs" role="tablist"></nav>
 
-            <section class="profile-section" id="section-papers" hidden>
-              <h3>代表性论文</h3>
-              <ul id="papers-list"></ul>
-            </section>
-
-            <section class="profile-section" id="section-news" hidden>
-              <h3>新闻与报道</h3>
-              <ul id="news-list"></ul>
-            </section>
-
-            <section class="profile-section" id="section-episode" hidden>
-              <h3>本期内容</h3>
-              <div id="episode-block"></div>
-            </section>
+          <!-- Markdown content area -->
+          <div class="page-content-wrap">
+            <div class="page-content markdown-body" id="page-content"></div>
           </div>
         </article>
       </section>
 
       <!-- RIGHT: chat panel -->
-      <aside class="ws-right">
+      <aside class="ws-right" id="ws-right">
         <div class="chat-panel" id="chat-panel">
           <header class="chat-header">
+            <button class="chat-close" id="chat-close" aria-label="关闭对话">×</button>
             <div class="chat-title">
               <span id="chat-with-name">与嘉宾对话</span>
             </div>
@@ -131,13 +121,14 @@
               placeholder="调研完成后开始对话…"
               disabled
             ></textarea>
-            <button type="submit" id="chat-send" disabled>发送</button>
+            <button type="submit" id="chat-send" disabled aria-label="发送">↑</button>
           </form>
         </div>
       </aside>
     </div>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>

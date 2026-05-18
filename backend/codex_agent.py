@@ -20,8 +20,6 @@ CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 
 @dataclass
 class CodexEvent:
-    """A single event from codex exec --json output."""
-
     raw: dict
 
     @property
@@ -45,9 +43,8 @@ class CodexEvent:
         return self.item.get("text", "")
 
 
-def _base_args() -> list[str]:
-    """Codex CLI flags shared between fresh runs and resume."""
-    return [
+def _base_args(workspace_dir: Optional[str]) -> list[str]:
+    args = [
         CODEX_BIN,
         "exec",
         "--json",
@@ -58,6 +55,11 @@ def _base_args() -> list[str]:
         "-c", "model_reasoning_effort=medium",
         "-m", "gpt-5.5",
     ]
+    if workspace_dir:
+        # `-C` makes the workspace root explicit (codex uses it for relative paths
+        # and confirms it's a "trusted" directory).
+        args += ["-C", workspace_dir]
+    return args
 
 
 def stream_codex(
@@ -72,10 +74,10 @@ def stream_codex(
     Args:
         prompt: The user prompt.
         resume_thread_id: If provided, resume an existing thread instead of starting fresh.
-        cwd: Working directory.
-        output_last_message: If provided, codex will write the last agent message to this file.
+        cwd: Working directory. Also passed as -C so codex treats it as the workspace.
+        output_last_message: If provided, codex writes the final agent message to this file.
     """
-    args = _base_args()
+    args = _base_args(cwd)
     if resume_thread_id:
         # subcommand position: codex exec [flags] resume <session_id> <prompt>
         args += ["resume", resume_thread_id]
@@ -84,7 +86,6 @@ def stream_codex(
     args.append(prompt)
 
     env = os.environ.copy()
-    # Make sure HOME and CODEX_HOME are set so codex finds auth.json.
     env.setdefault("CODEX_HOME", os.path.expanduser("~/.codex"))
 
     proc = subprocess.Popen(
@@ -97,7 +98,6 @@ def stream_codex(
         text=True,
     )
 
-    # Drain stderr in a background thread so it does not block.
     stderr_lines: list[str] = []
 
     def _drain_stderr() -> None:
@@ -117,7 +117,6 @@ def stream_codex(
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:
-                # Non-JSON line (e.g. status text). Emit as a synthetic event.
                 yield CodexEvent({"type": "stream.note", "text": line})
                 continue
             yield CodexEvent(raw)
@@ -139,7 +138,6 @@ def stream_codex_to_queue(
     cwd: Optional[str] = None,
     output_last_message: Optional[str] = None,
 ) -> None:
-    """Helper: push every event to a Queue. Caller runs this in a thread."""
     try:
         for event in stream_codex(
             prompt,
@@ -148,7 +146,7 @@ def stream_codex_to_queue(
             output_last_message=output_last_message,
         ):
             queue.put(event)
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # pragma: no cover
         queue.put(CodexEvent({"type": "stream.error", "error": str(exc)}))
     finally:
-        queue.put(None)  # sentinel = stream done
+        queue.put(None)

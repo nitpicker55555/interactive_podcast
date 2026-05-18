@@ -5,10 +5,13 @@
 
 const state = {
   taskId: null,
-  profile: null,
+  manifest: null,
+  currentPageFile: null,
+  pageCache: new Map(),       // file -> { md, html }
   researchEventSource: null,
   chatEventSource: null,
-  currentChatTurnId: null,
+  replayMode: false,           // true while replaying buffered events on deep-link load
+  activeTypewriter: null,      // current typewriter abort handle
 };
 
 const el = {
@@ -30,21 +33,15 @@ const el = {
   // profile
   profileCard: document.getElementById('profile-card'),
   profileAvatar: document.getElementById('profile-avatar'),
-  avatarFallback: document.getElementById('avatar-fallback'),
   profileName: document.getElementById('profile-name'),
   profileTitle: document.getElementById('profile-title'),
   profileCompany: document.getElementById('profile-company'),
-  profileBio: document.getElementById('profile-bio'),
+  profileOneliner: document.getElementById('profile-oneliner'),
   profileSocials: document.getElementById('profile-socials'),
-  perspectivesSection: document.getElementById('section-perspectives'),
-  perspectivesList: document.getElementById('perspectives-list'),
-  papersSection: document.getElementById('section-papers'),
-  papersList: document.getElementById('papers-list'),
-  newsSection: document.getElementById('section-news'),
-  newsList: document.getElementById('news-list'),
-  episodeSection: document.getElementById('section-episode'),
-  episodeBlock: document.getElementById('episode-block'),
+  pageTabs: document.getElementById('page-tabs'),
+  pageContent: document.getElementById('page-content'),
   // chat
+  wsRight: document.getElementById('ws-right'),
   chatWithName: document.getElementById('chat-with-name'),
   chatSub: document.getElementById('chat-sub'),
   chatMessages: document.getElementById('chat-messages'),
@@ -52,6 +49,8 @@ const el = {
   chatForm: document.getElementById('chat-form'),
   chatInput: document.getElementById('chat-input'),
   chatSend: document.getElementById('chat-send'),
+  chatClose: document.getElementById('chat-close'),
+  mobileChatToggle: document.getElementById('mobile-chat-toggle'),
 };
 
 /* ---------- helpers ---------- */
@@ -89,14 +88,75 @@ function resetWorkspace() {
   el.reasoningFeed.innerHTML = '';
   el.profileCard.hidden = true;
   el.profileSocials.innerHTML = '';
+  el.pageTabs.innerHTML = '';
+  el.pageContent.innerHTML = '';
+  el.pageContent.classList.remove('is-visible', 'is-leaving');
   el.researchPanel.classList.remove('is-collapsed', 'is-open');
   el.chatMessages.innerHTML = '';
   el.chatMessages.appendChild(el.chatEmpty);
   el.chatEmpty.style.display = '';
-  el.chatInput.disabled = true;
-  el.chatSend.disabled = true;
+  setChatEnabled(false);
   el.chatInput.placeholder = '调研完成后开始对话…';
-  state.profile = null;
+  el.mobileChatToggle.classList.remove('is-visible');
+  el.wsRight.classList.remove('is-open');
+  state.manifest = null;
+  state.currentPageFile = null;
+  state.pageCache.clear();
+  stepNodes.clear();
+  if (state.activeTypewriter) { state.activeTypewriter.cancel = true; state.activeTypewriter = null; }
+}
+
+function setChatEnabled(on) {
+  if (on) {
+    el.chatInput.removeAttribute('disabled');
+    el.chatSend.removeAttribute('disabled');
+    el.chatInput.readOnly = false;
+  } else {
+    el.chatInput.setAttribute('disabled', '');
+    el.chatSend.setAttribute('disabled', '');
+  }
+}
+
+/* ---------- typewriter ---------- */
+function typewriter(element, text, opts = {}) {
+  const minDuration = opts.minDuration ?? 240;
+  const maxDuration = opts.maxDuration ?? 1800;
+  const charsPerSec = opts.charsPerSec ?? 90;
+  const idealMs = (text.length / charsPerSec) * 1000;
+  const totalMs = Math.min(maxDuration, Math.max(minDuration, idealMs));
+  const handle = { cancel: false };
+
+  // Cancel any prior typewriter
+  if (state.activeTypewriter) state.activeTypewriter.cancel = true;
+  state.activeTypewriter = handle;
+
+  element.classList.add('is-typing');
+  element.textContent = '';
+
+  const start = performance.now();
+  return new Promise(resolve => {
+    function frame(now) {
+      if (handle.cancel) {
+        element.textContent = text;
+        element.classList.remove('is-typing');
+        resolve();
+        return;
+      }
+      const elapsed = now - start;
+      const progress = Math.min(1, elapsed / totalMs);
+      const charCount = Math.floor(text.length * progress);
+      element.textContent = text.slice(0, charCount);
+      if (progress >= 1) {
+        element.textContent = text;
+        element.classList.remove('is-typing');
+        if (state.activeTypewriter === handle) state.activeTypewriter = null;
+        resolve();
+      } else {
+        requestAnimationFrame(frame);
+      }
+    }
+    requestAnimationFrame(frame);
+  });
 }
 
 /* ---------- start research ---------- */
@@ -118,6 +178,10 @@ async function startResearch(url) {
     }
     const { task_id } = await resp.json();
     state.taskId = task_id;
+    // Update the URL so refresh / share works
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', `/?task=${task_id}`);
+    }
     openResearchStream(task_id);
   } catch (err) {
     setStatus('启动失败', 'error');
@@ -129,33 +193,32 @@ function openResearchStream(taskId) {
   if (state.researchEventSource) state.researchEventSource.close();
   const es = new EventSource(`/api/stream/${taskId}`);
   state.researchEventSource = es;
+  state.replayMode = true;
+  // After 800ms of activity we assume we're caught up with the live stream
+  setTimeout(() => { state.replayMode = false; }, 800);
 
   es.onmessage = (e) => {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
     handleResearchEvent(data);
   };
-
-  es.onerror = () => {
-    if (state.researchEventSource === es) {
-      // EventSource auto-reconnects; only treat as fatal if we have no profile after a while
-    }
-  };
 }
 
-/* ---------- event handlers (research stream) ---------- */
-const stepNodes = new Map(); // key -> li node
+/* ---------- research event handlers ---------- */
+const stepNodes = new Map();
 
 function handleResearchEvent(event) {
   if (!event || !event.kind) return;
   switch (event.kind) {
     case 'snapshot':
       if (event.status === 'researching') setStatus('正在调研', 'research');
+      else if (event.status === 'done') setStatus('调研完成', 'done');
+      else if (event.status === 'pending') setStatus('启动中…', 'research');
       return;
     case 'thread':
-      // ignore
-      return;
     case 'turn':
+    case 'usage':
+    case 'note':
       return;
     case 'step':
       renderStep(event);
@@ -165,10 +228,6 @@ function handleResearchEvent(event) {
         renderMessageBlock(event.text, 'message');
       }
       return;
-    case 'usage':
-      return;
-    case 'note':
-      return;
     case 'error':
       showError(event.text || '调研过程出错');
       setStatus('出错', 'error');
@@ -177,7 +236,6 @@ function handleResearchEvent(event) {
       finalizeResearch(event);
       return;
     case 'raw':
-      // hide unknown raw events to keep UI clean
       return;
   }
 }
@@ -185,7 +243,6 @@ function handleResearchEvent(event) {
 function renderStep(event) {
   const key = stepKey(event);
   let node = stepNodes.get(key);
-
   const isActive = event.status === 'started';
   const isDone = event.status === 'completed';
 
@@ -204,61 +261,63 @@ function renderStep(event) {
   body.innerHTML = '';
 
   if (event.subkind === 'web_search') {
-    icon.textContent = isDone ? '✓' : '◯';
+    icon.textContent = isDone ? '✓' : '◆';
     body.appendChild($('div', { className: 'step-label', text: '网络搜索' }));
     body.appendChild($('div', { className: 'step-text', text: event.query || '(无 query)' }));
+  } else if (event.subkind === 'mcp') {
+    icon.textContent = isDone ? '✓' : '◆';
+    body.appendChild($('div', { className: 'step-label', text: event.tool || 'MCP 工具' }));
+    if (event.args_summary) body.appendChild($('div', { className: 'step-text mono', text: event.args_summary }));
   } else if (event.subkind === 'shell') {
-    icon.textContent = isDone ? '✓' : '◯';
+    icon.textContent = isDone ? '✓' : '◆';
     body.appendChild($('div', { className: 'step-label', text: '执行命令' }));
     body.appendChild($('div', { className: 'step-text mono', text: event.command || '' }));
   } else if (event.subkind === 'reasoning') {
     if (isDone && event.text) {
-      // reasoning blocks go into the reasoning feed instead
       stepNodes.delete(key);
       node.remove();
       renderMessageBlock(event.text, 'reasoning');
       return;
     }
-    // otherwise show a transient line in the step list
     icon.textContent = '·';
     body.appendChild($('div', { className: 'step-label', text: '思考中' }));
   } else {
-    icon.textContent = isDone ? '✓' : '◯';
+    icon.textContent = isDone ? '✓' : '·';
     body.appendChild($('div', { className: 'step-label', text: event.subkind || 'step' }));
   }
 
   node.classList.toggle('is-active', isActive);
   node.classList.toggle('is-done', isDone);
 
-  scrollLeftPaneToBottom();
-}
-
-function scrollLeftPaneToBottom() {
-  // Only scroll the inner left pane, never the page. Skip while the panel
-  // is collapsed (the profile card is the focus then).
-  if (el.researchPanel.classList.contains('is-collapsed')) return;
-  const wsLeft = document.getElementById('ws-left');
-  if (!wsLeft) return;
-  // If user is within ~80px of the bottom, stay pinned; otherwise leave alone.
-  const nearBottom = wsLeft.scrollHeight - wsLeft.scrollTop - wsLeft.clientHeight < 120;
-  if (nearBottom) wsLeft.scrollTop = wsLeft.scrollHeight;
+  scrollLeftPaneIfPinned();
 }
 
 function stepKey(event) {
   if (event.subkind === 'web_search') return `ws:${event.query || ''}`;
+  if (event.subkind === 'mcp') return `mcp:${event.tool}:${event.args_summary}`;
   if (event.subkind === 'shell') return `sh:${event.command || ''}`;
   if (event.subkind === 'reasoning') return `rs:${Math.random()}`;
   return `${event.subkind}:${Math.random()}`;
 }
 
 function renderMessageBlock(text, kind /* 'message' | 'reasoning' */) {
-  const block = $('div', {
-    className: `thought-block is-${kind}`,
-  }, [
-    $('div', { className: 'thought-block-text', text }),
-  ]);
+  const textNode = $('div', { className: 'thought-block-text' });
+  const block = $('div', { className: `thought-block is-${kind}` }, [textNode]);
   el.reasoningFeed.appendChild(block);
-  scrollLeftPaneToBottom();
+  if (state.replayMode || kind === 'reasoning') {
+    textNode.textContent = text;
+  } else {
+    typewriter(textNode, text);
+  }
+  scrollLeftPaneIfPinned();
+}
+
+function scrollLeftPaneIfPinned() {
+  if (el.researchPanel.classList.contains('is-collapsed')) return;
+  const wsLeft = document.getElementById('ws-left');
+  if (!wsLeft) return;
+  const nearBottom = wsLeft.scrollHeight - wsLeft.scrollTop - wsLeft.clientHeight < 160;
+  if (nearBottom) wsLeft.scrollTop = wsLeft.scrollHeight;
 }
 
 function finalizeResearch(event) {
@@ -276,26 +335,27 @@ function finalizeResearch(event) {
     return;
   }
   setStatus('调研完成', 'done');
-  fetchAndRenderProfile();
+  fetchAndRenderManifest();
 }
 
-async function fetchAndRenderProfile() {
+async function fetchAndRenderManifest() {
   try {
     const resp = await fetch(`/api/result/${state.taskId}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
-    if (!data.profile) {
-      showError('未能解析人物档案。');
+    if (!data.manifest) {
+      showError(data.error || '未能解析人物档案。');
       return;
     }
-    state.profile = data.profile;
-    renderProfile(data.profile);
-    enableChat(data.profile);
-    // collapse research panel
+    state.manifest = data.manifest;
+    await renderProfile(data.manifest);
+    enableChat(data.manifest);
     el.researchPanel.classList.add('is-collapsed');
     const title = el.researchPanel.querySelector('.panel-title');
-    title.addEventListener('click', () => el.researchPanel.classList.toggle('is-open'));
-    // Bring the profile card into view (resets any auto-scroll done during streaming).
+    if (title && !title._toggleBound) {
+      title.addEventListener('click', () => el.researchPanel.classList.toggle('is-open'));
+      title._toggleBound = true;
+    }
     const wsLeft = document.getElementById('ws-left');
     if (wsLeft) wsLeft.scrollTop = 0;
   } catch (err) {
@@ -303,40 +363,42 @@ async function fetchAndRenderProfile() {
   }
 }
 
-/* ---------- profile rendering ---------- */
-function renderProfile(p) {
+/* ---------- profile + tabs ---------- */
+async function renderProfile(manifest) {
   el.profileCard.hidden = false;
+  const guest = manifest.guest || {};
 
-  // avatar
-  if (p.avatar_url) {
-    el.profileAvatar.innerHTML = '';
-    const img = $('img', { src: p.avatar_url, alt: p.name || 'avatar', referrerpolicy: 'no-referrer', loading: 'lazy' });
-    img.onerror = () => {
+  // Avatar
+  el.profileAvatar.innerHTML = '';
+  if (manifest.avatar) {
+    const img = $('img', {
+      src: `/api/asset/${state.taskId}/${encodeURIComponent(manifest.avatar)}`,
+      alt: guest.name || guest.name_en || 'avatar',
+    });
+    img.addEventListener('error', () => {
       el.profileAvatar.innerHTML = '';
-      const fb = $('span', { className: 'avatar-fallback', text: initial(p.name) });
-      el.profileAvatar.appendChild(fb);
-    };
+      el.profileAvatar.appendChild($('span', { className: 'avatar-fallback', text: initial(guest.name || guest.name_en) }));
+    });
     el.profileAvatar.appendChild(img);
   } else {
-    el.profileAvatar.innerHTML = '';
-    el.profileAvatar.appendChild($('span', { className: 'avatar-fallback', text: initial(p.name) }));
+    el.profileAvatar.appendChild($('span', { className: 'avatar-fallback', text: initial(guest.name || guest.name_en) }));
   }
 
-  const primaryName = p.name || p.name_en || '（未识别嘉宾）';
+  const primaryName = guest.name || guest.name_en || '（未识别嘉宾）';
   el.profileName.textContent = primaryName;
-  if (p.name && p.name_en && p.name_en !== p.name) {
+  if (guest.name && guest.name_en && guest.name_en !== guest.name) {
     const sub = document.createElement('span');
     sub.style.cssText = 'color: var(--text-faint); font-size: 0.55em; font-family: var(--font-sans); margin-left: 12px; font-weight: 400;';
-    sub.textContent = p.name_en;
+    sub.textContent = guest.name_en;
     el.profileName.appendChild(sub);
   }
-  el.profileTitle.textContent = p.title || '';
-  el.profileCompany.textContent = p.company || '';
-  el.profileBio.textContent = p.bio_long || p.bio_short || '';
+  el.profileTitle.textContent = guest.title || '';
+  el.profileCompany.textContent = guest.company || '';
+  el.profileOneliner.textContent = guest.one_liner || '';
 
-  // socials
+  // Socials
   el.profileSocials.innerHTML = '';
-  const social = p.social || {};
+  const social = manifest.social || {};
   const order = [
     ['personal_site', '个人网站'],
     ['twitter', 'X / Twitter'],
@@ -356,88 +418,96 @@ function renderProfile(p) {
     }
   }
 
-  // perspectives
-  renderListSection(el.perspectivesSection, el.perspectivesList, p.key_perspectives || [], (x) => {
-    return $('li', {}, [$('div', { className: 'list-row-title', text: x })]);
-  });
+  // Tabs
+  renderTabs(manifest.pages || []);
 
-  // papers
-  renderListSection(el.papersSection, el.papersList, p.papers || [], (x) => {
-    const titleNode = x.url
-      ? $('a', { className: 'list-row-title', href: x.url, target: '_blank', rel: 'noopener noreferrer', text: x.title || '(无标题)' })
-      : $('div', { className: 'list-row-title', text: x.title || '(无标题)' });
-    const meta = [x.venue, x.year].filter(Boolean).join(' · ');
-    const row = $('li', {}, [
-      $('div', { className: 'list-row' }, [
-        titleNode,
-        meta ? $('div', { className: 'list-row-meta', text: meta }) : null,
-        x.summary ? $('div', { className: 'list-row-summary', text: x.summary }) : null,
-      ]),
-    ]);
-    return row;
-  });
+  // Initial page
+  if ((manifest.pages || []).length > 0) {
+    await switchTab(manifest.pages[0].file);
+  }
+}
 
-  // news
-  renderListSection(el.newsSection, el.newsList, p.news || [], (x) => {
-    const titleNode = x.url
-      ? $('a', { className: 'list-row-title', href: x.url, target: '_blank', rel: 'noopener noreferrer', text: x.title || '(无标题)' })
-      : $('div', { className: 'list-row-title', text: x.title || '(无标题)' });
-    const meta = [x.source, x.date].filter(Boolean).join(' · ');
-    return $('li', {}, [
-      $('div', { className: 'list-row' }, [
-        titleNode,
-        meta ? $('div', { className: 'list-row-meta', text: meta }) : null,
-        x.summary ? $('div', { className: 'list-row-summary', text: x.summary }) : null,
-      ]),
-    ]);
+function renderTabs(pages) {
+  el.pageTabs.innerHTML = '';
+  pages.forEach((page, idx) => {
+    const btn = $('button', {
+      className: 'page-tab',
+      role: 'tab',
+      type: 'button',
+      text: page.title || `第 ${idx + 1} 页`,
+      'data-file': page.file,
+    });
+    btn.addEventListener('click', () => switchTab(page.file));
+    el.pageTabs.appendChild(btn);
   });
+}
 
-  // episode
-  if (p.podcast_episode) {
-    const pe = p.podcast_episode;
-    el.episodeSection.hidden = false;
-    el.episodeBlock.innerHTML = '';
-    if (pe.show) el.episodeBlock.appendChild($('div', { className: 'list-row-meta', text: pe.show }));
-    if (pe.title) {
-      const t = pe.url
-        ? $('a', { className: 'list-row-title', href: pe.url, target: '_blank', rel: 'noopener noreferrer', text: pe.title })
-        : $('div', { className: 'list-row-title', text: pe.title });
-      el.episodeBlock.appendChild(t);
+async function switchTab(file) {
+  if (!file || file === state.currentPageFile) return;
+  state.currentPageFile = file;
+
+  // Update tab visual state
+  for (const tab of el.pageTabs.querySelectorAll('.page-tab')) {
+    tab.classList.toggle('is-active', tab.getAttribute('data-file') === file);
+  }
+
+  // Fade out, swap content, fade in
+  el.pageContent.classList.add('is-leaving');
+  el.pageContent.classList.remove('is-visible');
+  await wait(140);
+
+  let html = state.pageCache.get(file);
+  if (!html) {
+    try {
+      const resp = await fetch(`/api/page/${state.taskId}/${encodeURIComponent(file)}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const md = await resp.text();
+      html = renderMarkdown(md);
+      state.pageCache.set(file, html);
+    } catch (err) {
+      html = `<p style="color: var(--error);">加载页面失败：${escapeHtml(err.message)}</p>`;
     }
-    if (pe.summary) el.episodeBlock.appendChild($('div', { className: 'list-row-summary', text: pe.summary }));
-  } else {
-    el.episodeSection.hidden = true;
   }
+
+  el.pageContent.innerHTML = html;
+  el.pageContent.classList.remove('is-leaving');
+  requestAnimationFrame(() => el.pageContent.classList.add('is-visible'));
 }
 
-function renderListSection(sectionEl, ulEl, items, renderItem) {
-  ulEl.innerHTML = '';
-  if (!items || items.length === 0) {
-    sectionEl.hidden = true;
-    return;
+function renderMarkdown(md) {
+  if (typeof window.marked !== 'undefined') {
+    window.marked.setOptions({ breaks: true, gfm: true });
+    return window.marked.parse(md);
   }
-  sectionEl.hidden = false;
-  for (const item of items) {
-    ulEl.appendChild(renderItem(item));
-  }
+  // Fallback: minimal escaping
+  return `<pre>${escapeHtml(md)}</pre>`;
 }
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function initial(name) {
   if (!name) return '·';
-  // grab first non-space char
   const s = String(name).trim();
   return s ? s[0] : '·';
 }
 
 /* ---------- chat ---------- */
-function enableChat(profile) {
-  const name = profile.name || profile.name_en || '嘉宾';
+function enableChat(manifest) {
+  const guest = manifest.guest || {};
+  const name = guest.name || guest.name_en || '嘉宾';
   el.chatWithName.textContent = `与 ${name} 对话`;
-  el.chatSub.textContent = '由 Codex agent 以这个人的口吻回应';
-  el.chatInput.disabled = false;
-  el.chatSend.disabled = false;
+  el.chatSub.textContent = `Codex agent 以 ${name} 的口吻回应`;
   el.chatInput.placeholder = `直接对 ${name} 说点什么…`;
-  el.chatInput.focus();
+  setChatEnabled(true);
+
+  // Mobile: show FAB
+  el.mobileChatToggle.classList.add('is-visible');
+  const label = el.mobileChatToggle.querySelector('.chat-toggle-label');
+  if (label) label.textContent = `与 ${name} 对话`;
 }
 
 function appendChatMessage(role, text) {
@@ -460,20 +530,21 @@ function appendTypingBubble() {
   const wrap = $('div', { className: 'chat-msg is-agent' });
   const bubble = $('div', { className: 'chat-msg-bubble' });
   bubble.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+  const statusLine = $('div', { className: 'chat-msg-status', text: '思考中…' });
   wrap.appendChild(bubble);
+  wrap.appendChild(statusLine);
   el.chatMessages.appendChild(wrap);
   el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
-  return bubble;
+  return { bubble, statusLine };
 }
 
 async function sendChatMessage(message) {
   if (!state.taskId) return;
   appendChatMessage('user', message);
-  const typingBubble = appendTypingBubble();
+  const { bubble: typingBubble, statusLine } = appendTypingBubble();
   el.chatInput.value = '';
   autoSizeInput();
-  el.chatInput.disabled = true;
-  el.chatSend.disabled = true;
+  setChatEnabled(false);
 
   try {
     const resp = await fetch(`/api/chat/${state.taskId}`, {
@@ -486,16 +557,15 @@ async function sendChatMessage(message) {
       throw new Error(data.error || `HTTP ${resp.status}`);
     }
     const { turn_id } = await resp.json();
-    state.currentChatTurnId = turn_id;
-    openChatStream(turn_id, typingBubble);
+    openChatStream(turn_id, typingBubble, statusLine);
   } catch (err) {
     typingBubble.textContent = `（出错：${err.message}）`;
-    el.chatInput.disabled = false;
-    el.chatSend.disabled = false;
+    statusLine.remove();
+    setChatEnabled(true);
   }
 }
 
-function openChatStream(turnId, typingBubble) {
+function openChatStream(turnId, typingBubble, statusLine) {
   if (state.chatEventSource) state.chatEventSource.close();
   const es = new EventSource(`/api/chat/stream/${turnId}`);
   state.chatEventSource = es;
@@ -505,32 +575,47 @@ function openChatStream(turnId, typingBubble) {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
     if (!data || !data.kind) return;
-    if (data.kind === 'message' && data.status === 'completed' && data.text) {
-      typingBubble.textContent = data.text;
+
+    if (data.kind === 'step') {
+      let label = '';
+      if (data.subkind === 'web_search') label = data.query ? `搜索：${data.query.slice(0, 32)}` : '搜索中';
+      else if (data.subkind === 'mcp') label = `调用 ${data.tool || 'mcp'}`;
+      else if (data.subkind === 'shell') label = '执行命令';
+      else if (data.subkind === 'reasoning') label = '推理中';
+      if (label && data.status !== 'completed' && statusLine && statusLine.parentNode) {
+        statusLine.textContent = label;
+      }
+    } else if (data.kind === 'message' && data.status === 'completed' && data.text) {
+      typingBubble.innerHTML = '';
+      typewriter(typingBubble, data.text).then(() => {
+        el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+      });
+      if (statusLine && statusLine.parentNode) statusLine.remove();
       gotMessage = true;
       el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
     } else if (data.kind === 'error') {
       typingBubble.textContent = `（出错：${data.text || '未知错误'}）`;
+      if (statusLine && statusLine.parentNode) statusLine.remove();
     } else if (data.kind === 'final') {
       es.close();
       state.chatEventSource = null;
       if (!gotMessage) {
         typingBubble.textContent = data.error ? `（出错：${data.error}）` : '（没有收到回复）';
+        statusLine.remove();
       }
-      el.chatInput.disabled = false;
-      el.chatSend.disabled = false;
+      setChatEnabled(true);
       el.chatInput.focus();
     }
   };
 
   es.onerror = () => {
-    // EventSource will try to reconnect; if it fails repeatedly, the 'final' event won't come,
-    // so unlock the input after a brief grace period.
     setTimeout(() => {
       if (state.chatEventSource === es && es.readyState === EventSource.CLOSED) {
-        if (!gotMessage) typingBubble.textContent = '（连接中断）';
-        el.chatInput.disabled = false;
-        el.chatSend.disabled = false;
+        if (!gotMessage) {
+          typingBubble.textContent = '（连接中断）';
+          statusLine.remove();
+        }
+        setChatEnabled(true);
       }
     }, 2000);
   };
@@ -539,7 +624,7 @@ function openChatStream(turnId, typingBubble) {
 function autoSizeInput() {
   const ta = el.chatInput;
   ta.style.height = 'auto';
-  ta.style.height = Math.min(120, ta.scrollHeight) + 'px';
+  ta.style.height = Math.min(140, Math.max(42, ta.scrollHeight)) + 'px';
 }
 
 /* ---------- errors ---------- */
@@ -548,6 +633,15 @@ function showError(message) {
   if (existing) existing.remove();
   const banner = $('div', { className: 'error-banner', text: message });
   el.researchPanel.insertBefore(banner, el.researchPanel.firstChild);
+}
+
+/* ---------- mobile chat drawer ---------- */
+function openMobileChat() {
+  el.wsRight.classList.add('is-open');
+  setTimeout(() => el.chatInput.focus(), 240);
+}
+function closeMobileChat() {
+  el.wsRight.classList.remove('is-open');
 }
 
 /* ---------- bind ---------- */
@@ -564,15 +658,15 @@ el.backBtn.addEventListener('click', () => {
   state.researchEventSource = null;
   state.chatEventSource = null;
   state.taskId = null;
-  state.profile = null;
   resetWorkspace();
   switchView('landing');
+  if (window.history && window.history.replaceState) window.history.replaceState(null, '', '/');
 });
 
 el.chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const message = el.chatInput.value.trim();
-  if (!message || el.chatInput.disabled) return;
+  if (!message || el.chatInput.hasAttribute('disabled')) return;
   sendChatMessage(message);
 });
 
@@ -584,19 +678,22 @@ el.chatInput.addEventListener('keydown', (e) => {
   }
 });
 
-/* ---------- deep-link: ?task=<id> opens a completed task, ?url=<...> auto-starts a new one ---------- */
+el.mobileChatToggle.addEventListener('click', openMobileChat);
+el.chatClose.addEventListener('click', closeMobileChat);
+
+/* ---------- deep-link ---------- */
 (function deepLink() {
   const params = new URLSearchParams(location.search);
   const taskParam = params.get('task');
   const urlParam = params.get('url');
   if (taskParam) {
     state.taskId = taskParam;
-    el.wsUrl.textContent = '(已有任务)';
+    el.wsUrl.textContent = '(载入中…)';
     switchView('workspace');
-    setStatus('加载中…', 'pending');
-    // Attach to the live stream. If the task already finished, the stream's
-    // iter_events still yields buffered events (we'll see a `final` frame and
-    // load the profile via finalizeResearch).
+    setStatus('加载中…', 'research');
+    fetch(`/api/result/${taskParam}`).then(r => r.json()).then(d => {
+      if (d.url) el.wsUrl.textContent = d.url;
+    }).catch(() => {});
     openResearchStream(taskParam);
   } else if (urlParam) {
     el.urlInput.value = urlParam;

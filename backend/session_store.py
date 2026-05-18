@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional
+
+
+def _resolve_data_root() -> str:
+    """Pick a session root OUTSIDE this app's git repo, so codex doesn't get
+    confused and treat the parent git repo as its workspace.
+    """
+    override = os.environ.get("PODCAST_DATA_ROOT")
+    if override:
+        return override
+    return os.path.expanduser("~/.local/state/interactive_podcast")
+
+
+DATA_ROOT = _resolve_data_root()
+SESSIONS_DIR = os.path.join(DATA_ROOT, "sessions")
+os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 
 @dataclass
@@ -16,12 +32,17 @@ class Task:
     status: str = "pending"  # pending | researching | done | error
     thread_id: Optional[str] = None  # codex thread for research
     chat_thread_id: Optional[str] = None  # codex thread for role-play
-    profile: Optional[dict] = None
+    manifest: Optional[dict] = None
+    persona_text: Optional[str] = None
+    overview_text: Optional[str] = None
     error: Optional[str] = None
-    raw_last_message: Optional[str] = None
     events: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     _cond: threading.Condition = field(default_factory=threading.Condition)
+
+    @property
+    def workspace_dir(self) -> str:
+        return os.path.join(SESSIONS_DIR, self.id)
 
     def append(self, event: dict) -> None:
         with self._cond:
@@ -39,13 +60,11 @@ class Task:
         return self.status in ("done", "error")
 
     def iter_events(self, from_index: int = 0) -> Iterator[dict]:
-        """Yield existing events from `from_index` and block for new ones until finished."""
         idx = from_index
         while True:
             with self._cond:
                 while idx >= len(self.events) and not self.is_finished():
                     self._cond.wait(timeout=10)
-                # snapshot what we can deliver
                 if idx < len(self.events):
                     pending = self.events[idx:]
                     idx = len(self.events)
@@ -60,8 +79,6 @@ class Task:
 
 @dataclass
 class ChatTurn:
-    """One streaming chat reply in progress."""
-
     id: str
     task_id: str
     user_message: str
@@ -104,8 +121,6 @@ class ChatTurn:
 
 
 class Store:
-    """Thread-safe in-memory registry of tasks and chat turns."""
-
     def __init__(self) -> None:
         self._tasks: dict[str, Task] = {}
         self._chat_turns: dict[str, ChatTurn] = {}
@@ -113,6 +128,7 @@ class Store:
 
     def create_task(self, url: str) -> Task:
         task = Task(id=uuid.uuid4().hex, url=url)
+        os.makedirs(task.workspace_dir, exist_ok=True)
         with self._lock:
             self._tasks[task.id] = task
         return task
@@ -132,5 +148,4 @@ class Store:
             return self._chat_turns.get(turn_id)
 
 
-# Singleton used by the Flask app.
 store = Store()
