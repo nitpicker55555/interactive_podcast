@@ -322,9 +322,13 @@ function renderProfile(p) {
     el.profileAvatar.appendChild($('span', { className: 'avatar-fallback', text: initial(p.name) }));
   }
 
-  el.profileName.textContent = p.name || '（未识别）';
-  if (p.name_en && p.name_en !== p.name) {
-    el.profileName.textContent += `  ${p.name_en}`;
+  const primaryName = p.name || p.name_en || '（未识别嘉宾）';
+  el.profileName.textContent = primaryName;
+  if (p.name && p.name_en && p.name_en !== p.name) {
+    const sub = document.createElement('span');
+    sub.style.cssText = 'color: var(--text-faint); font-size: 0.55em; font-family: var(--font-sans); margin-left: 12px; font-weight: 400;';
+    sub.textContent = p.name_en;
+    el.profileName.appendChild(sub);
   }
   el.profileTitle.textContent = p.title || '';
   el.profileCompany.textContent = p.company || '';
