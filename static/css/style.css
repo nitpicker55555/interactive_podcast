@@ -478,6 +478,103 @@ input, textarea {
   animation: rise var(--duration-slow) var(--ease) forwards;
 }
 
+/* ---- person switcher (guest / host) ---- */
+.person-switcher {
+  display: flex;
+  gap: 0;
+  padding: 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.person-switcher:empty { display: none; }
+
+.person-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-muted);
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease),
+              color var(--duration-fast) var(--ease),
+              box-shadow var(--duration-fast) var(--ease);
+  text-align: left;
+  min-width: 0;
+}
+
+.person-tab:hover {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.person-tab.is-active {
+  background: var(--bg-card);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  cursor: default;
+}
+
+.person-tab-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  font-family: var(--font-serif);
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.person-tab-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.person-tab-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.person-tab-role {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+.person-tab.is-active .person-tab-role {
+  color: var(--accent);
+}
+
+.person-tab-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.profile-role-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
 .profile-header {
   display: grid;
   grid-template-columns: 120px 1fr;
@@ -1029,6 +1126,12 @@ input, textarea {
 
   .page-tabs { padding: 0 10px; }
   .page-tab { padding: 12px 12px; font-size: 12.5px; }
+
+  .person-switcher { padding: 6px; }
+  .person-tab { padding: 6px 8px; gap: 8px; }
+  .person-tab-avatar { width: 24px; height: 24px; font-size: 12px; }
+  .person-tab-name { font-size: 12.5px; }
+  .person-tab-role { font-size: 9.5px; }
 
   .page-content-wrap { padding: 20px 18px 28px; }
   .markdown-body { font-size: 14.5px; line-height: 1.72; }

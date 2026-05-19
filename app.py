@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
-from typing import Iterator
+from typing import Iterator, Optional
 
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory, stream_with_context, abort
 
@@ -92,16 +92,29 @@ def api_result(task_id: str):
     )
 
 
-@app.get("/api/page/<task_id>/<path:filename>")
-def api_page(task_id: str, filename: str):
-    """Return raw markdown for a page."""
+def _resolve_person_dir(task, person_key: str) -> Optional[str]:
+    """Get the on-disk directory for a given person, accounting for legacy
+    flat layouts (single-guest manifest without subdirs)."""
+    people = (task.manifest or {}).get("people") or {}
+    person = people.get(person_key)
+    if person is None:
+        return None
+    if person.get("_legacy_flat"):
+        return task.workspace_dir
+    return os.path.join(task.workspace_dir, person_key)
+
+
+@app.get("/api/page/<task_id>/<person_key>/<path:filename>")
+def api_page(task_id: str, person_key: str, filename: str):
     task = store.get_task(task_id)
     if task is None:
         return jsonify({"error": "task not found"}), 404
-    full = _safe_join(task.workspace_dir, filename)
+    person_dir = _resolve_person_dir(task, person_key)
+    if person_dir is None:
+        return jsonify({"error": f"unknown person: {person_key}"}), 404
+    full = _safe_join(person_dir, filename)
     if not os.path.exists(full):
         return jsonify({"error": "page not found"}), 404
-    # Only allow .md files via this endpoint
     if not full.endswith(".md"):
         return jsonify({"error": "not a markdown file"}), 400
     with open(full, "r", encoding="utf-8") as f:
@@ -109,20 +122,21 @@ def api_page(task_id: str, filename: str):
     return Response(text, mimetype="text/markdown; charset=utf-8")
 
 
-@app.get("/api/asset/<task_id>/<path:filename>")
-def api_asset(task_id: str, filename: str):
-    """Serve binary assets (e.g. the avatar image) from the task workspace."""
+@app.get("/api/asset/<task_id>/<person_key>/<path:filename>")
+def api_asset(task_id: str, person_key: str, filename: str):
     task = store.get_task(task_id)
     if task is None:
         return jsonify({"error": "task not found"}), 404
-    full = _safe_join(task.workspace_dir, filename)
+    person_dir = _resolve_person_dir(task, person_key)
+    if person_dir is None:
+        return jsonify({"error": f"unknown person: {person_key}"}), 404
+    full = _safe_join(person_dir, filename)
     if not os.path.exists(full):
         return jsonify({"error": "asset not found"}), 404
-    # Don't expose .md or .json via this endpoint — those have dedicated routes.
     if full.endswith(".md") or full.endswith(".json"):
-        return jsonify({"error": "use /api/page or /api/result"}), 400
+        return jsonify({"error": "use /api/page"}), 400
     mt, _ = mimetypes.guess_type(full)
-    return send_from_directory(task.workspace_dir, filename, mimetype=mt or "application/octet-stream")
+    return send_from_directory(person_dir, filename, mimetype=mt or "application/octet-stream")
 
 
 @app.post("/api/chat/<task_id>")
@@ -138,9 +152,13 @@ def api_chat(task_id: str):
     if not message:
         return jsonify({"error": "message is required"}), 400
 
-    turn = store.create_chat_turn(task.id, message)
+    person_key = (body.get("person") or "").strip() or task.manifest.get("primary_key") or "guest"
+    if person_key not in (task.manifest.get("people") or {}):
+        return jsonify({"error": f"unknown person: {person_key}"}), 400
+
+    turn = store.create_chat_turn(task.id, message, person_key=person_key)
     start_chat_turn_in_background(turn)
-    return jsonify({"turn_id": turn.id})
+    return jsonify({"turn_id": turn.id, "person": person_key})
 
 
 @app.get("/api/chat/stream/<turn_id>")

@@ -10,7 +10,7 @@ from typing import Optional
 from .chat_streaming import stream_chat
 from .codex_agent import CodexEvent, stream_codex
 from .prompts import build_research_prompt, build_roleplay_system_prompt
-from .session_store import ChatTurn, Task, store
+from .session_store import ChatTurn, Task, _migrate_manifest_if_needed, store
 
 
 def _classify(event: CodexEvent) -> dict:
@@ -100,7 +100,7 @@ def _classify(event: CodexEvent) -> dict:
 
 
 def _load_artifacts(task: Task) -> Optional[str]:
-    """After codex finishes, read manifest.json + persona/overview files.
+    """After codex finishes, read manifest.json + each person's persona/overview.
     Returns None on success, error string on failure.
     """
     manifest_path = os.path.join(task.workspace_dir, "manifest.json")
@@ -116,54 +116,72 @@ def _load_artifacts(task: Task) -> Optional[str]:
     if not isinstance(manifest, dict):
         return "manifest.json must be a JSON object"
 
-    pages = manifest.get("pages") or []
-    if not isinstance(pages, list) or not pages:
-        return "manifest.json missing pages[]"
+    manifest = _migrate_manifest_if_needed(manifest)
+    people = manifest.get("people") or {}
+    if not isinstance(people, dict) or not people:
+        return "manifest.json missing people{}"
 
-    # Verify each page file exists
-    missing = []
-    for p in pages:
-        if not isinstance(p, dict):
+    persona_texts: dict[str, str] = {}
+    overview_texts: dict[str, str] = {}
+    missing_files: list[str] = []
+
+    for key, person in people.items():
+        if not isinstance(person, dict):
             continue
-        fname = p.get("file")
-        if not fname:
-            continue
-        fp = os.path.join(task.workspace_dir, fname)
-        if not os.path.exists(fp):
-            missing.append(fname)
-    if missing:
-        return f"missing page files: {', '.join(missing)}"
+        person_dir = os.path.join(task.workspace_dir, key)
+        # Legacy single-person manifests didn't use subdirs.
+        if person.get("_legacy_flat"):
+            person_dir = task.workspace_dir
 
-    # Load persona + overview for role-play context
-    persona_file = manifest.get("persona_file")
-    persona_text = ""
-    if persona_file:
-        try:
-            with open(os.path.join(task.workspace_dir, persona_file), "r", encoding="utf-8") as f:
-                persona_text = f.read()
-        except OSError:
-            pass  # non-fatal
+        pages = person.get("pages") or []
+        if not isinstance(pages, list) or not pages:
+            return f"person {key!r} missing pages[]"
 
-    overview_text = ""
-    if pages:
-        first_page = pages[0].get("file") if isinstance(pages[0], dict) else None
-        if first_page:
+        for p in pages:
+            if not isinstance(p, dict):
+                continue
+            fname = p.get("file")
+            if not fname:
+                continue
+            fp = os.path.join(person_dir, fname)
+            if not os.path.exists(fp):
+                missing_files.append(f"{key}/{fname}")
+
+        # Avatar: null it out if file missing
+        avatar = person.get("avatar")
+        if avatar:
+            avatar_path = os.path.join(person_dir, avatar)
+            if not os.path.exists(avatar_path):
+                person["avatar"] = None
+
+        # Persona text (optional but required for role-play)
+        pfile = person.get("persona_file")
+        if pfile:
             try:
-                with open(os.path.join(task.workspace_dir, first_page), "r", encoding="utf-8") as f:
-                    overview_text = f.read()
+                with open(os.path.join(person_dir, pfile), "r", encoding="utf-8") as f:
+                    persona_texts[key] = f.read()
             except OSError:
                 pass
 
-    # Avatar: verify it exists if mentioned
-    avatar = manifest.get("avatar")
-    if avatar:
-        avatar_path = os.path.join(task.workspace_dir, avatar)
-        if not os.path.exists(avatar_path):
-            manifest["avatar"] = None  # agent referenced a file but didn't create it
+        # First page = overview
+        first = pages[0].get("file") if isinstance(pages[0], dict) else None
+        if first:
+            try:
+                with open(os.path.join(person_dir, first), "r", encoding="utf-8") as f:
+                    overview_texts[key] = f.read()
+            except OSError:
+                pass
+
+    if missing_files:
+        return f"missing page files: {', '.join(missing_files)}"
+
+    if "primary_key" not in manifest or manifest["primary_key"] not in people:
+        # Pick the first person as primary if not set
+        manifest["primary_key"] = next(iter(people.keys()))
 
     task.manifest = manifest
-    task.persona_text = persona_text
-    task.overview_text = overview_text
+    task.persona_texts = persona_texts
+    task.overview_texts = overview_texts
     return None
 
 
@@ -207,14 +225,20 @@ def _run_chat_turn(turn: ChatTurn) -> None:
         turn.set_status("error", error="task not found or manifest missing")
         return
 
-    # Build messages = [system, ...history, current user]
+    people = (task.manifest or {}).get("people") or {}
+    person_key = (turn.person_key or "").strip() or (task.manifest or {}).get("primary_key") or "guest"
+    person = people.get(person_key)
+    if person is None:
+        turn.set_status("error", error=f"unknown person: {person_key!r}")
+        return
+
     with task._chat_lock:  # noqa: SLF001
         system_prompt = build_roleplay_system_prompt(
-            manifest=task.manifest,
-            persona_text=task.persona_text or "",
-            overview_text=task.overview_text or "",
+            person=person,
+            persona_text=task.persona_texts.get(person_key, ""),
+            overview_text=task.overview_texts.get(person_key, ""),
         )
-        history = list(task.chat_history)
+        history = list(task.chat_history.get(person_key) or [])
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -250,10 +274,11 @@ def _run_chat_turn(turn: ChatTurn) -> None:
         turn.set_status("error", error=error)
         return
 
-    # Append both user message + assistant reply to history atomically
+    # Append user message + assistant reply to that person's history atomically.
     with task._chat_lock:  # noqa: SLF001
-        task.chat_history.append({"role": "user", "content": turn.user_message})
-        task.chat_history.append({"role": "assistant", "content": full_reply})
+        bucket = task.chat_history.setdefault(person_key, [])
+        bucket.append({"role": "user", "content": turn.user_message})
+        bucket.append({"role": "assistant", "content": full_reply})
 
     turn.append({"kind": "message", "status": "completed", "text": full_reply})
     turn.set_status("done")

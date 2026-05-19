@@ -73,11 +73,15 @@
         </div>
 
         <article class="profile-card" id="profile-card" hidden>
+          <!-- Person switcher (guest / host) -->
+          <nav class="person-switcher" id="person-switcher" role="tablist" aria-label="人物切换"></nav>
+
           <header class="profile-header">
             <div class="profile-avatar" id="profile-avatar">
               <span class="avatar-fallback" id="avatar-fallback">·</span>
             </div>
             <div class="profile-meta">
+              <div class="profile-role-badge" id="profile-role-badge"></div>
               <h2 class="profile-name" id="profile-name"></h2>
               <div class="profile-title" id="profile-title"></div>
               <div class="profile-company" id="profile-company"></div>

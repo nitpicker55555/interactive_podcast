@@ -32,10 +32,12 @@ class Task:
     status: str = "pending"  # pending | researching | done | error
     thread_id: Optional[str] = None  # codex thread for research
     chat_thread_id: Optional[str] = None  # legacy, unused after openai chat
-    chat_history: list[dict] = field(default_factory=list)  # role/content message log for role-play
+    # Per-person chat history: {"guest": [...], "host": [...]}
+    chat_history: dict[str, list[dict]] = field(default_factory=dict)
+    # Per-person persona + overview text loaded from disk, keyed by person_key.
+    persona_texts: dict[str, str] = field(default_factory=dict)
+    overview_texts: dict[str, str] = field(default_factory=dict)
     manifest: Optional[dict] = None
-    persona_text: Optional[str] = None
-    overview_text: Optional[str] = None
     error: Optional[str] = None
     events: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
@@ -84,6 +86,7 @@ class ChatTurn:
     id: str
     task_id: str
     user_message: str
+    person_key: str = "guest"  # which person the user is talking to
     status: str = "pending"  # pending | streaming | done | error
     error: Optional[str] = None
     events: list[dict] = field(default_factory=list)
@@ -159,38 +162,51 @@ class Store:
         except (OSError, ValueError):
             return None
 
-        persona_text = ""
-        overview_text = ""
-        persona_file = manifest.get("persona_file")
-        if persona_file:
-            try:
-                with open(os.path.join(workspace, persona_file), "r", encoding="utf-8") as f:
-                    persona_text = f.read()
-            except OSError:
-                pass
-        pages = manifest.get("pages") or []
-        if pages and isinstance(pages[0], dict) and pages[0].get("file"):
-            try:
-                with open(os.path.join(workspace, pages[0]["file"]), "r", encoding="utf-8") as f:
-                    overview_text = f.read()
-            except OSError:
-                pass
+        manifest = _migrate_manifest_if_needed(manifest)
+        persona_texts: dict[str, str] = {}
+        overview_texts: dict[str, str] = {}
+        people = (manifest or {}).get("people") or {}
+        for key, person in people.items():
+            person_dir = os.path.join(workspace, key)
+            pfile = person.get("persona_file")
+            if pfile:
+                try:
+                    with open(os.path.join(person_dir, pfile), "r", encoding="utf-8") as f:
+                        persona_texts[key] = f.read()
+                except OSError:
+                    pass
+            pages = person.get("pages") or []
+            if pages and isinstance(pages[0], dict) and pages[0].get("file"):
+                try:
+                    with open(os.path.join(person_dir, pages[0]["file"]), "r", encoding="utf-8") as f:
+                        overview_texts[key] = f.read()
+                except OSError:
+                    pass
 
         task = Task(
             id=task_id,
             url=(manifest.get("podcast_episode") or {}).get("url") or "",
             status="done",
             manifest=manifest,
-            persona_text=persona_text,
-            overview_text=overview_text,
+            persona_texts=persona_texts,
+            overview_texts=overview_texts,
         )
         with self._lock:
-            # Race: somebody else may have created/loaded it in the meantime
             self._tasks.setdefault(task.id, task)
             return self._tasks[task.id]
 
-    def create_chat_turn(self, task_id: str, user_message: str) -> ChatTurn:
-        turn = ChatTurn(id=uuid.uuid4().hex, task_id=task_id, user_message=user_message)
+    def create_chat_turn(
+        self,
+        task_id: str,
+        user_message: str,
+        person_key: str = "guest",
+    ) -> ChatTurn:
+        turn = ChatTurn(
+            id=uuid.uuid4().hex,
+            task_id=task_id,
+            user_message=user_message,
+            person_key=person_key,
+        )
         with self._lock:
             self._chat_turns[turn.id] = turn
         return turn
@@ -198,6 +214,44 @@ class Store:
     def get_chat_turn(self, turn_id: str) -> Optional[ChatTurn]:
         with self._lock:
             return self._chat_turns.get(turn_id)
+
+
+def _migrate_manifest_if_needed(manifest: dict) -> dict:
+    """Convert legacy single-guest manifests to the new multi-person shape.
+
+    Legacy shape (only guest, flat):
+        {"guest": {...}, "avatar": "...", "social": {...}, "pages": [...],
+         "persona_file": "...", "podcast_episode": {...}}
+
+    New shape:
+        {"primary_key": "guest", "people": {"guest": {...}, "host": {...}},
+         "podcast_episode": {...}}
+
+    Files in legacy layout were flat (avatar.jpeg, 01-overview.md). We mark
+    the migrated guest with `_legacy_flat: true` so the file resolver falls
+    back to the workspace root for that person.
+    """
+    if not isinstance(manifest, dict):
+        return manifest
+    if "people" in manifest and isinstance(manifest["people"], dict):
+        return manifest
+
+    if "guest" in manifest and isinstance(manifest["guest"], dict):
+        guest = {
+            "role": "guest",
+            **manifest["guest"],
+            "avatar": manifest.get("avatar"),
+            "social": manifest.get("social") or {},
+            "pages": manifest.get("pages") or [],
+            "persona_file": manifest.get("persona_file"),
+            "_legacy_flat": True,
+        }
+        return {
+            "primary_key": "guest",
+            "people": {"guest": guest},
+            "podcast_episode": manifest.get("podcast_episode") or {},
+        }
+    return manifest
 
 
 store = Store()
